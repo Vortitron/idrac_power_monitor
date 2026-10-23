@@ -87,6 +87,8 @@ class IdracData:
     power_supplies: dict[str, tuple[str, bool | None]] = field(default_factory=dict)
     # PSU id -> input power (W), only for PSUs whose iDRAC reports it
     psu_input_watts: dict[str, float] = field(default_factory=dict)
+    # PSU id -> input (line) voltage; 0 V means the PSU has no input power
+    psu_input_volts: dict[str, float | None] = field(default_factory=dict)
     # System Event Log, oldest first; None when this iDRAC's log can't be read
     alerts: list[Alert] | None = None
 

@@ -73,6 +73,20 @@ def health_ok(status: dict | None) -> bool | None:
     return health == 'OK'
 
 
+def psu_input_watts(supply: dict, metrics: dict) -> float | None:
+    """Input power of one PSU: /Power lists it inline, PowerSubsystem in its metrics."""
+    if (watts := as_number(supply.get('PowerInputWatts'))) is not None:
+        return watts
+    return as_number((metrics.get('InputPowerWatts') or {}).get('Reading'))
+
+
+def psu_input_volts(supply: dict, metrics: dict) -> float | None:
+    """Line input voltage of one PSU; 0 when it has lost its input."""
+    if 'LineInputVoltage' in supply:
+        return as_number(supply.get('LineInputVoltage'))
+    return as_number((metrics.get('InputVoltage') or {}).get('Reading'))
+
+
 def is_idrac9_firmware(firmware: str | None) -> bool:
     """iDRAC 9 firmware is 3.x and later; iDRAC 7/8 run 1.x / 2.x. Unknown: assume it might be."""
     if not firmware:
@@ -276,8 +290,11 @@ class IdracRedfish(IdracClient):
             if status.get('State') == 'Absent':
                 continue
             data.power_supplies[psu_id] = (supply.get('Name') or psu_id, health_ok(status))
-            if (watts := await self._psu_input_watts(supply)) is not None:
+            metrics = await self._psu_metrics(supply)
+            if (watts := psu_input_watts(supply, metrics)) is not None:
                 data.psu_input_watts[psu_id] = watts
+            if 'LineInputVoltage' in supply or 'InputVoltage' in metrics:
+                data.psu_input_volts[psu_id] = psu_input_volts(supply, metrics)
         if not plausible_psu_inputs(data.psu_input_watts, data.power_watts):
             _LOGGER.debug('Per-PSU input power on %s (%s) exceeds the server total (%s W): not live readings',
                           self.host, data.psu_input_watts, data.power_watts)
@@ -292,15 +309,12 @@ class IdracRedfish(IdracClient):
         self._dumped.add(what)
         _LOGGER.debug('%s on %s: %s', what, self.host, json.dumps(payload, default=str)[:LOGGED_RESPONSE_CHARS])
 
-    async def _psu_input_watts(self, supply: dict) -> float | None:
-        """Input power of one PSU: /Power lists it inline, PowerSubsystem behind a Metrics link."""
-        if (watts := as_number(supply.get('PowerInputWatts'))) is not None:
-            return watts
+    async def _psu_metrics(self, supply: dict) -> dict:
+        """PowerSupplyMetrics behind a PowerSubsystem PSU's Metrics link ({} for /Power PSUs)."""
         metrics_path = (supply.get('Metrics') or {}).get('@odata.id')
         if not metrics_path:
-            return None
-        metrics = await self.get_json(metrics_path) or {}
-        return as_number((metrics.get('InputPowerWatts') or {}).get('Reading'))
+            return {}
+        return await self.get_json(metrics_path) or {}
 
     async def _fetch_alerts(self, data: IdracData) -> None:
         """System Event Log entries, oldest first. Read at most once a minute."""

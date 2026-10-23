@@ -313,3 +313,45 @@ async def test_a_flood_of_new_entries_reports_only_the_newest(hass: HomeAssistan
     fired = [event.data['new_state'].attributes['message'] for event in events
              if event.data['new_state'] and event.data['new_state'].attributes.get('message')]
     assert fired == [f'Entry {n}' for n in range(16, 26)]
+
+
+async def test_psu_input_voltage_tells_a_fan_failure_from_a_lost_feed(
+        hass: HomeAssistant, aioclient_mock: AiohttpClientMocker):
+    """PS1 with a failed fan still has input (and still supplies power); PS2 lost its feed."""
+    supplies = [dict(supply) for supply in R620_SUPPLIES]
+    supplies[0].update(Status={'Health': 'Critical', 'State': 'Enabled'}, LineInputVoltage=232)
+    supplies[1].update(Status={'Health': 'Critical', 'State': 'Enabled'}, LineInputVoltage=0)
+    resources = dict(IDRAC8)
+    resources[f'{CHASSIS}/Power'] = {'PowerControl': [{'PowerConsumedWatts': 177}], 'PowerSupplies': supplies}
+    serve(aioclient_mock, resources, OLD_ENTRIES)
+    await setup_entry(hass)
+
+    ps1 = hass.states.get(entity_id(hass, 'sensor', 'psu_volts_PSU.Slot.1'))
+    ps2 = hass.states.get(entity_id(hass, 'sensor', 'psu_volts_PSU.Slot.2'))
+    assert ps1.state == '232' and ps1.attributes['unit_of_measurement'] == 'V'
+    assert ps1.attributes['friendly_name'] == 'PowerEdge R720 PS1 input voltage'
+    assert ps2.state == '0'
+    # Both report a problem; only the voltage says which one has no feed
+    assert hass.states.get(entity_id(hass, 'binary_sensor', 'psu_PSU.Slot.1')).state == 'on'
+    assert hass.states.get(entity_id(hass, 'binary_sensor', 'psu_PSU.Slot.2')).state == 'on'
+
+
+async def test_idrac9_psu_input_voltage_from_metrics(hass: HomeAssistant, aioclient_mock: AiohttpClientMocker):
+    resources = {k: v for k, v in IDRAC8.items() if not k.endswith(('/Power', '/Thermal'))}
+    resources[f'{CHASSIS}/EnvironmentMetrics'] = {'PowerWatts': {'Reading': 230}}
+    resources[f'{CHASSIS}/PowerSubsystem/PowerSupplies'] = {'Members': [
+        {'Id': 'PSU.Slot.1', 'Name': 'PS1 Status', 'Status': {'Health': 'OK', 'State': 'Enabled'},
+         'Metrics': {'@odata.id': '/redfish/v1/Chassis/System.Embedded.1/PowerSubsystem/PowerSupplies/PSU.Slot.1/Metrics'}}]}
+    resources[f'{CHASSIS}/PowerSubsystem/PowerSupplies/PSU.Slot.1/Metrics'] = {
+        'InputPowerWatts': {'Reading': 236}, 'InputVoltage': {'Reading': 229}}
+    aioclient_mock.clear_requests()
+    for url in (f'{CHASSIS}/Power', f'{CHASSIS}/Thermal', f'{CHASSIS}/ThermalSubsystem/Fans', f'{CHASSIS}/Sensors'):
+        aioclient_mock.get(url, status=404, text='')
+    for url, body in resources.items():
+        aioclient_mock.get(url, json=body)
+    aioclient_mock.get('https://10.0.0.2/start.html', status=404)
+    aioclient_mock.post('https://10.0.0.2/data/login', status=404)
+    aioclient_mock.post('https://10.0.0.2/sysmgmt/2015/bmc/session', status=404)
+    no_event_log(aioclient_mock)
+    await setup_entry(hass)
+    assert hass.states.get(entity_id(hass, 'sensor', 'psu_volts_PSU.Slot.1')).state == '229'
