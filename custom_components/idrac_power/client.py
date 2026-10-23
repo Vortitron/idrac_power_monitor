@@ -97,12 +97,15 @@ def active_problems(alerts: list[Alert]) -> list[Alert]:
     """Warning / critical entries not cleared by a later entry for the same sensor.
 
     `alerts` is oldest first. A later deassert (or OK entry) for the same
-    sensor ends the problem: "PSU 2 input lost" followed seconds later by
-    "PSU 2 input restored" leaves nothing active.
+    sensor and kind of event ends the problem: "PSU 2 input lost" followed
+    seconds later by "PSU 2 input restored" leaves nothing active.
     """
     active: dict[str, Alert] = {}
     for alert in alerts:
-        key = alert.sensor or alert.message
+        # One sensor raises several conditions (PSU 1: input lost, fan
+        # failure, ...); the message id tells them apart, so "input restored"
+        # ends "input lost" but not "fan failure"
+        key = f'{alert.sensor}|{alert.message_id}' if alert.sensor else alert.message
         if alert.severity != 'OK' and alert.assertion != 'Deassert':
             active[key] = alert
         else:

@@ -355,3 +355,30 @@ async def test_idrac9_psu_input_voltage_from_metrics(hass: HomeAssistant, aiocli
     no_event_log(aioclient_mock)
     await setup_entry(hass)
     assert hass.states.get(entity_id(hass, 'sensor', 'psu_volts_PSU.Slot.1')).state == '229'
+
+
+async def test_restoring_one_condition_leaves_another_on_the_same_sensor(
+        hass: HomeAssistant, aioclient_mock: AiohttpClientMocker):
+    """R620, 22 Oct: PSU 1 input lost, fan failure, input restored — the fan failure stays active.
+
+    Dell logs every PSU 1 event under sensor 98; the message id says which condition it is.
+    """
+    def entry(entry_id, created, severity, assertion, sensor, message_id, message):
+        item = r620_entry(entry_id, created, severity, assertion, sensor, message)
+        item['MessageId'] = message_id
+        return item
+
+    log = [  # newest first
+        entry(332, '2026-10-22T14:25:27-05:00', 'OK', 'Deassert', 98, '3ffff', 'The input power for power supply 1 has been restored.'),
+        entry(331, '2026-10-22T14:21:09-05:00', 'Critical', 'Assert', 98, '817ff', 'Fan failure detected on power supply 1.'),
+        entry(330, '2026-10-22T14:20:59-05:00', 'Critical', 'Assert', 98, '3ffff', 'The power input for power supply 1 is lost.'),
+        entry(329, '2026-10-22T14:20:58-05:00', 'Critical', 'Redundancy Lost', 116, '1ffff', 'Power supply redundancy is lost.'),
+    ]
+    serve(aioclient_mock, idrac8(), log)
+    await setup_entry(hass)
+
+    health = hass.states.get(entity_id(hass, 'binary_sensor', 'health'))
+    assert health.attributes['active_problems'] == [
+        'Critical: Power supply redundancy is lost.',
+        'Critical: Fan failure detected on power supply 1.',
+    ]
